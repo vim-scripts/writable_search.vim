@@ -1,0 +1,30 @@
+This is a mirror of http://www.vim.org/scripts/script.php?script_id=4865
+
+The plugin exposes the command `:WritableSearch`, which takes a search query and performs a grep (or ack, or a different search command -- see below), with that query. For example:
+
+    :WritableSearch function_call\(
+
+The results are opened in a new tab (by default), and are very similar to what you would get from performing the search on the command-line. The difference is that you can now edit this buffer and, upon writing, the original files will be updated with the changes. This gives you a very simple and straightforward search-and-replace process.
+
+If you change the filenames in the header blocks, those files will be renamed (with some manual confirmation that you can turn off if you're feeling adventurous). For example, if the header says:
+
+    foo/bar.txt:12-34
+
+and you change that to:
+
+    foo/renamed.txt:12-34
+
+Then the file "foo/bar.txt" will be renamed to "foo/renamed.txt". If this is not possible, you'll get an error.
+
+If you change the line numbers displayed in the headers, the virtual "window" that this search result is pointing to will reposition itself to those line numbers. For example, if the header says:
+
+    foo/bar.txt:12-34
+
+and you change that to:
+
+    foo/bar.txt:10-22
+
+Then the lines displayed will now be the ones from 10 to 22.
+
+The plugin uses "egrep" by default, but can also use "ack", and it can piggyback on the "ack.vim" plugin. For more control, it can also take an existing buffer with some search results and turn them into the writable search buffer. Take a look at the documentation to learn more.
+
