@@ -1,13 +1,38 @@
-function! writable_search#Start(query)
-  if a:query != ''
-    if expand('%') != '' && &filetype != 'writable_search'
-      call s:NewBuffer()
-    endif
+function! writable_search#Start(query, count)
+  echo "Searching ..."
 
-    call s:Grep(a:query)
-    let @/ = a:query
+  if a:count > 0
+    " then we've selected something in visual mode
+    let query = shellescape(s:LastSelectedText())
+  elseif a:query == ''
+    " no pattern is provided, search for the word under the cursor
+    let query = expand("<cword>")
+  else
+    let query = a:query
+  end
+
+  if query == ''
+    echoerr "No query given"
+    return
   endif
 
+  if expand('%') != '' && &filetype != 'writable_search'
+    call s:NewBuffer()
+  endif
+
+  silent call s:Grep(query)
+
+  if g:writable_search_highlight != ''
+    if exists('b:query_highlight_id')
+      call matchdelete(b:query_highlight_id)
+    endif
+    let b:query_highlight_id = matchadd(g:writable_search_highlight, '^\s.*\zs'.query, 0)
+  endif
+
+  call writable_search#Parse()
+endfunction
+
+function! writable_search#Parse()
   let b:proxies = writable_search#parser#Run()
 
   if empty(b:proxies)
@@ -23,116 +48,124 @@ endfunction
 
 function! writable_search#Rerun(...)
   if a:0 > 0
-    let b:rerun_args = a:1
-
-    %delete _
-    exe b:command.' '.a:1
-    0delete _
+    let b:command.extra_flags = a:1
   endif
 
-  call writable_search#Start('')
+  %delete _
+  call b:command.Read()
+  0delete _
+
+  call writable_search#Parse()
 endfunction
 
 function! writable_search#Update()
-  try
-    call writable_search#cursor#Push()
-    normal! gg
+  call writable_search#cursor#Push()
+  normal! gg0
 
-    let header_pattern   = '^\S.*$'
-    let last_proxy_index = 0
-    let proxy_updates    = []
+  let header_pattern   = '^\S.*$'
+  let last_proxy_index = 0
+  let proxy_updates    = []
 
-    " Zip up proxies and their new line ranges
-    let header_lineno = search(header_pattern, 'Wc')
-    while header_lineno > 0
-      let header_line          = getline(header_lineno)
-      let previous_end_lineno  = header_lineno - 1
-      let current_start_lineno = header_lineno + 1
+  " Zip up proxies and their new line ranges
+  let header_lineno = search(header_pattern, 'Wc')
+  while header_lineno > 0
+    let header_line          = getline(header_lineno)
+    let previous_end_lineno  = header_lineno - 1
+    let current_start_lineno = header_lineno + 1
 
-      if len(b:proxies) <= last_proxy_index
-        echoerr "Number of patches doesn't add up"
-        return
-      endif
-
-      if len(proxy_updates) > 0
-        let proxy_updates[-1].local_end = previous_end_lineno
-      endif
-
-      let [_, filename, start_line, end_line; rest] = matchlist(header_line, '\v^(.*):(\d+)-(\d+)')
-
-      call add(proxy_updates, {
-            \ 'proxy':       b:proxies[last_proxy_index],
-            \ 'local_start': current_start_lineno,
-            \ 'local_end':   -1,
-            \ 'filename':    filename,
-            \ 'start_line':  str2nr(start_line),
-            \ 'end_line':    str2nr(end_line),
-            \ })
-      let last_proxy_index += 1
-
-      " Jump to the next line for the next search
-      exe current_start_lineno
-      let header_lineno = search(header_pattern, 'Wc')
-    endwhile
-
-    " Update last proxy
-    if len(proxy_updates) > 0
-      let proxy_updates[-1].local_end = line('$')
-    endif
-
-    " Validate that we've got all the proxies and their new lines
-    if len(proxy_updates) != len(b:proxies)
+    if len(b:proxies) <= last_proxy_index
       echoerr "Number of patches doesn't add up"
       return
     endif
 
-    for proxy_update in proxy_updates
-      if proxy_update.local_end < 0
-        echoerr "Error parsing update"
-        return
-      endif
+    if len(proxy_updates) > 0
+      let proxy_updates[-1].local_end = previous_end_lineno
+    endif
+
+    let [_, filename, start_line, end_line; rest] = matchlist(header_line, '\v^(.*):(\d+)-(\d+)')
+
+    call add(proxy_updates, {
+          \ 'proxy':       b:proxies[last_proxy_index],
+          \ 'local_start': current_start_lineno,
+          \ 'local_end':   -1,
+          \ 'filename':    filename,
+          \ 'start_line':  str2nr(start_line),
+          \ 'end_line':    str2nr(end_line),
+          \ })
+    let last_proxy_index += 1
+
+    " Jump to the next line for the next search
+    exe current_start_lineno
+    let header_lineno = search(header_pattern, 'Wc')
+  endwhile
+
+  " Update last proxy
+  if len(proxy_updates) > 0
+    let proxy_updates[-1].local_end = line('$')
+  endif
+
+  " Validate that we've got all the proxies and their new lines
+  if len(proxy_updates) != len(b:proxies)
+    echoerr "Number of patches doesn't add up"
+    return
+  endif
+
+  for proxy_update in proxy_updates
+    if proxy_update.local_end < 0
+      echoerr "Error parsing update"
+      return
+    endif
+  endfor
+
+  " Keep a dictionary of changed line counts per filename
+  let deltas = {}
+
+  " Keep a dictionary of changed file names
+  let renames = {}
+
+  " Perform actual update
+  for proxy_update in proxy_updates
+    let proxy = proxy_update.proxy
+
+    " adjust for any renames
+    if has_key(renames, proxy.filename)
+      let proxy.filename = renames[proxy.filename]
+    endif
+
+    " collect new lines, removing first whitespace char from view
+    let new_lines = []
+    for line in getbufline('%', proxy_update.local_start, proxy_update.local_end)
+      call add(new_lines, line[1:])
     endfor
 
-    " Keep a dictionary of changed line counts per filename
-    let deltas = {}
+    if !has_key(deltas, proxy.filename)
+      let deltas[proxy.filename] = 0
+    endif
+    let deltas[proxy.filename] += proxy.UpdateSource(new_lines, deltas[proxy.filename])
 
-    " Perform actual update
-    for proxy_update in proxy_updates
-      let proxy = proxy_update.proxy
+    let proxy.start_line = proxy_update.start_line
+    let proxy.end_line   = proxy_update.end_line
 
-      " collect new lines, removing first whitespace char from view
-      let new_lines = []
-      for line in getbufline('%', proxy_update.local_start, proxy_update.local_end)
-        call add(new_lines, line[1:])
-      endfor
-
-      if !has_key(deltas, proxy.filename)
-        let deltas[proxy.filename] = 0
-      endif
-      let deltas[proxy.filename] += proxy.UpdateSource(new_lines, deltas[proxy.filename])
-
-      let proxy.start_line = proxy_update.start_line
-      let proxy.end_line   = proxy_update.end_line
-
-      if proxy_update.filename != proxy.filename
-        if g:writable_search_confirm_file_rename
-          if confirm(printf('Rename "%s" to "%s"?', proxy.filename, proxy_update.filename))
-            call proxy.RenameFile(proxy_update.filename)
-          endif
-        else
+    if proxy_update.filename != proxy.filename
+      if g:writable_search_confirm_file_rename
+        if confirm(printf('Rename "%s" to "%s"?', proxy.filename, proxy_update.filename))
+          let renames[proxy.filename] = proxy_update.filename
           call proxy.RenameFile(proxy_update.filename)
         endif
+      else
+        let renames[proxy.filename] = proxy_update.filename
+        call proxy.RenameFile(proxy_update.filename)
       endif
+    endif
 
-      call proxy.UpdateLocal()
-    endfor
+    call proxy.UpdateLocal()
+  endfor
 
-    " Re-render to make changes visible
-    call writable_search#Render()
-    set nomodified
-  finally
-    call writable_search#cursor#Pop()
-  endtry
+  " Re-render to make changes visible
+  call writable_search#Render()
+  set nomodified
+
+  call writable_search#cursor#Pop()
 endfunction
 
 function! writable_search#Render()
@@ -173,37 +206,47 @@ function! s:NewBuffer()
 endfunction
 
 function! s:Grep(query)
-  let egrep_command = 'r!egrep %s . -R -n -H %s'
-  let ack_command   = 'r!ack %s --nogroup %s'
-  let ag_command    = 'r!ag %s --nogroup %s'
+  if g:writable_search_command_type != ''
+    let b:command = writable_search#command#New(g:writable_search_command_type, a:query)
 
-  let escaped_query = shellescape(a:query)
-
-  if g:writable_search_context_lines
-    let flags = '-C'.g:writable_search_context_lines
+    if !b:command.IsSupported()
+      unlet b:command
+      echoerr "The command type '".g:writable_search_command_type."' is not supported on this system"
+      return
+    endif
   else
-    let flags = ''
+    for possible_command in g:writable_search_backends
+      let b:command = writable_search#command#New(possible_command, a:query)
+
+      if b:command.IsSupported()
+        break
+      else
+        unlet b:command
+      endif
+    endfor
   endif
 
-  if g:writable_search_command_type == 'egrep'
-    let b:command = printf(egrep_command, escaped_query, flags)
-  elseif g:writable_search_command_type == 'ack'
-    let b:command = printf(ack_command, escaped_query, flags)
-  elseif g:writable_search_command_type == 'ag'
-    let b:command = printf(ag_command, escaped_query, flags)
-  elseif g:writable_search_command_type == 'ack.vim'
-    let ackprg = g:ackprg
-    let ackprg = substitute(ackprg, '--column', '', '')
-
-    let b:command = 'r!'.ackprg.' '.escaped_query.' --nogroup '.flags
-  else
-    echoerr "Unknown value for g:writable_search_command_type:  "
-          \ .g:writable_search_command_type
-          \ .". Needs to be one of 'egrep', 'ack', 'ack.vim'"
+  if !exists('b:command')
+    echoerr "Couldn't find a supported command on the system from: ".join(g:writable_search_backends, ', ')
     return
   endif
 
   %delete _
-  exe b:command
+  call b:command.Read()
   0delete _
+endfunction
+
+function! s:LastSelectedText()
+  let saved_cursor = getpos('.')
+
+  let original_reg      = getreg('z')
+  let original_reg_type = getregtype('z')
+
+  normal! gv"zy
+  let text = @z
+
+  call setreg('z', original_reg, original_reg_type)
+  call setpos('.', saved_cursor)
+
+  return text
 endfunction

@@ -1,5 +1,7 @@
 This is a mirror of http://www.vim.org/scripts/script.php?script_id=4865
 
+Github project: https://github.com/AndrewRadev/writable_search.vim
+
 The plugin exposes the command `:WritableSearch`, which takes a search query and performs a grep (or ack, or a different search command -- see below), with that query. For example:
 
     :WritableSearch function_call\(
